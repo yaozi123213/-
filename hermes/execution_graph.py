@@ -1,10 +1,11 @@
-"""LangGraph execution state machine for Hermes Phase 1 integration."""
+"""LangGraph-style execution state machine for Hermes Phase 1."""
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any, TypedDict
 
-from langgraph.graph import END, START, StateGraph
+from hermes.langgraph_bridge import InMemoryCheckpointStore
 
 
 class ExecutionState(TypedDict, total=False):
@@ -19,54 +20,59 @@ class ExecutionState(TypedDict, total=False):
 MAX_RETRIES = 1
 
 
-def _execute(state: ExecutionState) -> ExecutionState:
+def execute_step(state: ExecutionState) -> ExecutionState:
     text = state.get("input_text", "")
     if not text:
-        return {"status": "degraded", "error": "empty-input"}
-    return {
-        "status": "ok",
-        "output_text": text,
-    }
+        state["status"] = "degraded"
+        state["error"] = "empty-input"
+        return state
+    state["status"] = "ok"
+    state["output_text"] = text
+    state.pop("error", None)
+    return state
 
 
-def _retry_or_degrade(state: ExecutionState) -> ExecutionState:
+def retry_or_degrade_step(state: ExecutionState) -> ExecutionState:
     retries = state.get("retries", 0)
     if state.get("status") == "ok":
         return state
     if retries < MAX_RETRIES:
-        return {"retries": retries + 1, "status": "retry"}
-    return {"status": "degraded"}
-
-
-def _human_in_the_loop(state: ExecutionState) -> ExecutionState:
-    if state.get("status") != "degraded":
+        state["retries"] = retries + 1
+        state["status"] = "retry"
         return state
-    return {
-        "status": "human_review_required",
-    }
+    state["status"] = "degraded"
+    return state
 
 
-def _route_after_execute(state: ExecutionState) -> str:
-    return "retry_or_degrade"
-
-
-def _route_after_retry(state: ExecutionState) -> str:
-    if state.get("status") == "retry":
-        return "execute"
+def human_in_the_loop_step(state: ExecutionState) -> ExecutionState:
     if state.get("status") == "degraded":
-        return "human_in_the_loop"
-    return END
+        state["status"] = "human_review_required"
+    return state
 
 
-def build_execution_graph() -> StateGraph:
-    graph = StateGraph(ExecutionState)
-    graph.add_node("execute", _execute)
-    graph.add_node("retry_or_degrade", _retry_or_degrade)
-    graph.add_node("human_in_the_loop", _human_in_the_loop)
+def run_execution_flow(
+    initial_state: ExecutionState,
+    checkpoint_store: InMemoryCheckpointStore,
+    session_id: str,
+) -> ExecutionState:
+    """Run the minimal Phase 1 execution flow with checkpoint snapshots."""
 
-    graph.add_edge(START, "execute")
-    graph.add_conditional_edges("execute", _route_after_execute)
-    graph.add_conditional_edges("retry_or_degrade", _route_after_retry)
-    graph.add_edge("human_in_the_loop", END)
+    state: ExecutionState = deepcopy(initial_state)
 
-    return graph
+    state = execute_step(state)
+    checkpoint_store.save(session_id, state)
+
+    state = retry_or_degrade_step(state)
+    checkpoint_store.save(session_id, state)
+
+    if state.get("status") == "retry":
+        state = execute_step(state)
+        checkpoint_store.save(session_id, state)
+        state = retry_or_degrade_step(state)
+        checkpoint_store.save(session_id, state)
+
+    if state.get("status") == "degraded":
+        state = human_in_the_loop_step(state)
+        checkpoint_store.save(session_id, state)
+
+    return deepcopy(state)
