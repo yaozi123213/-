@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 
@@ -26,10 +26,13 @@ class InMemoryCheckpointStore:
         self._states: dict[str, ExecutionState] = {}
 
     def save_sync(self, state: ExecutionState) -> None:
-        self._states[state.session_id] = state
+        self._states[state.session_id] = replace(state, metadata=dict(state.metadata))
 
     def load(self, session_id: str) -> ExecutionState | None:
-        return self._states.get(session_id)
+        state = self._states.get(session_id)
+        if state is None:
+            return None
+        return replace(state, metadata=dict(state.metadata))
 
 
 class HermesExecutionGraph:

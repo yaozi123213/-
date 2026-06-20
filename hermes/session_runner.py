@@ -22,6 +22,6 @@ class SessionRunner:
             "status": state.status,
             "output": state.output,
             "requires_human": state.requires_human,
-            "profile": self.control_plane.profile,
+            "profile": dict(self.control_plane.profile),
             "gateway": self.control_plane.gateway,
         }
